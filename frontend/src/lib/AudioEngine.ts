@@ -1,5 +1,3 @@
-import { PitchShifter } from 'soundtouchjs';
-
 export interface LoopBounds {
   start: number;
   end: number;
@@ -15,20 +13,17 @@ export interface SpeedRampConfig {
 type Callback<T extends unknown[]> = (...args: T) => void;
 
 /**
- * AudioEngine — wraps Web Audio API + soundtouchjs PitchShifter.
+ * AudioEngine — Rubber Band WASM for studio-quality time stretching and pitch shifting.
  *
- * Design:
- *  - AudioContext + EQ chain created once in constructor
- *  - PitchShifter created per-track in load()
- *  - play/pause = AudioContext resume/suspend (simplest reliable approach)
- *  - Single setInterval tick for position tracking + loop checking
+ * The AudioWorklet processor manages its own playback position and feeds
+ * audio to Rubber Band at exactly the rate it needs — no AudioBufferSourceNode.
  */
 export class AudioEngine {
   private ctx: AudioContext;
-  private shifter: PitchShifter | null = null;
+  private rbNode: AudioWorkletNode | null = null;
   private buffer: AudioBuffer | null = null;
 
-  // Persistent audio nodes (created once, reused across tracks)
+  // Persistent audio nodes
   private lowpass: BiquadFilterNode;
   private highpass: BiquadFilterNode;
   private gain: GainNode;
@@ -39,6 +34,7 @@ export class AudioEngine {
   private _pitch = 0;
   private _loop: LoopBounds | null = null;
   private _videoId: string | null = null;
+  private _currentTime = 0;
 
   // Speed ramp
   private _ramp: SpeedRampConfig = {
@@ -49,10 +45,10 @@ export class AudioEngine {
   };
   private _loopCount = 0;
 
-  // Position tick
+  // Tick for loop checking
   private _tick: ReturnType<typeof setInterval> | null = null;
 
-  // Callbacks (single listener each — the React hook is the only consumer)
+  // Callbacks
   onTimeUpdate: Callback<[number]> | null = null;
   onPlayStateChange: Callback<[boolean]> | null = null;
   onLoopRestart: Callback<[number, number]> | null = null;
@@ -60,7 +56,6 @@ export class AudioEngine {
   constructor() {
     this.ctx = new AudioContext();
 
-    // Persistent EQ + gain chain (never destroyed)
     this.lowpass = this.ctx.createBiquadFilter();
     this.lowpass.type = 'lowpass';
     this.lowpass.frequency.value = 20000;
@@ -74,12 +69,10 @@ export class AudioEngine {
     this.gain = this.ctx.createGain();
     this.gain.gain.value = 1.0;
 
-    // Wire: [shifter] → lowpass → highpass → gain → speakers
     this.lowpass.connect(this.highpass);
     this.highpass.connect(this.gain);
     this.gain.connect(this.ctx.destination);
 
-    // Start suspended so nothing plays until explicitly told to
     this.ctx.suspend();
   }
 
@@ -89,7 +82,7 @@ export class AudioEngine {
     return this._playing;
   }
   get currentTime(): number {
-    return this.shifter?.timePlayed ?? 0;
+    return this._currentTime;
   }
   get duration(): number {
     return this.buffer?.duration ?? 0;
@@ -116,36 +109,64 @@ export class AudioEngine {
   // ── Load ─────────────────────────────────────────────────
 
   async load(videoId: string): Promise<{ duration: number }> {
-    // Stop anything currently playing
     if (this._playing) this.pause();
-    this.destroyShifter();
 
-    // Context must be running to decode audio
     await this.ctx.resume();
 
+    // Initialize AudioWorklet (once)
+    if (!this.rbNode) {
+      const wasmResponse = await fetch('/rubberband.wasm');
+      const wasmBytes = await wasmResponse.arrayBuffer();
+
+      await this.ctx.audioWorklet.addModule('/rb-processor.js');
+      this.rbNode = new AudioWorkletNode(this.ctx, 'rb-processor', {
+        numberOfInputs: 0,  // No input — processor reads audio internally
+        numberOfOutputs: 1,
+        outputChannelCount: [2],
+      });
+      this.rbNode.connect(this.lowpass);
+
+      // Send WASM binary
+      this.rbNode.port.postMessage(wasmBytes, [wasmBytes]);
+
+      // Listen for position updates from processor
+      this.rbNode.port.onmessage = (e) => {
+        if (e.data?.type === 'position') {
+          this._currentTime = e.data.readPos / this.ctx.sampleRate;
+          this.onTimeUpdate?.(this._currentTime);
+          this.checkLoop(this._currentTime);
+        }
+      };
+
+      // Small delay for WASM to initialize
+      await new Promise((r) => setTimeout(r, 200));
+    }
+
+    // Fetch and decode audio
     const res = await fetch(`/api/stream/${videoId}`);
     if (!res.ok) throw new Error(`Failed to fetch audio: ${res.statusText}`);
 
     const raw = await res.arrayBuffer();
     this.buffer = await this.ctx.decodeAudioData(raw);
     this._videoId = videoId;
+    this._currentTime = 0;
     this._loopCount = 0;
 
-    // Reset speed for ramp if enabled
     if (this._ramp.enabled) {
       this._speed = this._ramp.startSpeed;
     }
 
-    // Create PitchShifter for this track
-    this.shifter = new PitchShifter(this.ctx, this.buffer, 4096, () => {
-      // Song finished — pause
-      this.pause();
-    });
-    this.shifter.tempo = this._speed;
-    this.shifter.pitchSemitones = this._pitch;
-    this.shifter.connect(this.lowpass);
+    // Send audio data to processor
+    const channels: Float32Array[] = [];
+    for (let c = 0; c < this.buffer.numberOfChannels; c++) {
+      channels.push(this.buffer.getChannelData(c));
+    }
+    this.rbNode.port.postMessage({ type: 'audio', channels });
 
-    // Freeze immediately so it doesn't auto-play
+    // Apply settings
+    this.sendMsg(['tempo', this._speed]);
+    this.sendMsg(['pitch', semitonesToPitch(this._pitch)]);
+
     await this.ctx.suspend();
 
     return { duration: this.buffer.duration };
@@ -154,8 +175,9 @@ export class AudioEngine {
   // ── Transport ────────────────────────────────────────────
 
   play(): void {
-    if (!this.shifter || this._playing) return;
+    if (!this.rbNode || !this.buffer || this._playing) return;
     this.ctx.resume();
+    this.sendMsg(['play']);
     this._playing = true;
     this.startTick();
     this.onPlayStateChange?.(true);
@@ -164,6 +186,7 @@ export class AudioEngine {
   pause(): void {
     if (!this._playing) return;
     this._playing = false;
+    this.sendMsg(['pause']);
     this.stopTick();
     this.ctx.suspend();
     this.onPlayStateChange?.(false);
@@ -175,10 +198,11 @@ export class AudioEngine {
   }
 
   seek(time: number): void {
-    if (!this.shifter || !this.buffer) return;
+    if (!this.buffer) return;
     const clamped = Math.max(0, Math.min(time, this.buffer.duration));
-    this.shifter.percentagePlayed = clamped / this.buffer.duration;
-    // Fire an immediate time update so the UI reflects the seek
+    const samplePos = Math.floor(clamped * this.ctx.sampleRate);
+    this.sendMsg(['seek', samplePos]);
+    this._currentTime = clamped;
     this.onTimeUpdate?.(clamped);
   }
 
@@ -186,12 +210,12 @@ export class AudioEngine {
 
   setSpeed(rate: number): void {
     this._speed = Math.max(0.25, Math.min(2.0, rate));
-    if (this.shifter) this.shifter.tempo = this._speed;
+    this.sendMsg(['tempo', this._speed]);
   }
 
   setPitch(semitones: number): void {
     this._pitch = Math.max(-12, Math.min(12, semitones));
-    if (this.shifter) this.shifter.pitchSemitones = this._pitch;
+    this.sendMsg(['pitch', semitonesToPitch(this._pitch)]);
   }
 
   setEQ(lowpassFreq: number, highpassFreq: number): void {
@@ -214,7 +238,7 @@ export class AudioEngine {
     this._loopCount = 0;
     if (this._ramp.enabled) {
       this._speed = this._ramp.startSpeed;
-      if (this.shifter) this.shifter.tempo = this._speed;
+      this.sendMsg(['tempo', this._speed]);
     }
   }
 
@@ -230,7 +254,7 @@ export class AudioEngine {
     if (this._ramp.enabled) {
       this._speed = this._ramp.startSpeed;
       this._loopCount = 0;
-      if (this.shifter) this.shifter.tempo = this._speed;
+      this.sendMsg(['tempo', this._speed]);
     }
   }
 
@@ -238,20 +262,27 @@ export class AudioEngine {
 
   destroy(): void {
     this.pause();
-    this.destroyShifter();
+    if (this.rbNode) {
+      this.sendMsg(['close']);
+      this.rbNode.disconnect();
+      this.rbNode = null;
+    }
     if (this.ctx.state !== 'closed') this.ctx.close();
   }
 
   // ── Internal ─────────────────────────────────────────────
 
+  private sendMsg(msg: unknown[]): void {
+    this.rbNode?.port.postMessage(JSON.stringify(msg));
+  }
+
   private startTick(): void {
     this.stopTick();
+    // Tick just for loop checking — position comes from processor
     this._tick = setInterval(() => {
-      if (!this.shifter || !this._playing) return;
-      const t = this.shifter.timePlayed;
-      this.onTimeUpdate?.(t);
-      this.checkLoop(t);
-    }, 50);
+      if (!this._playing) return;
+      this.checkLoop(this._currentTime);
+    }, 100);
   }
 
   private stopTick(): void {
@@ -262,30 +293,24 @@ export class AudioEngine {
   }
 
   private checkLoop(time: number): void {
-    if (!this._loop || !this.shifter || !this.buffer) return;
+    if (!this._loop || !this.buffer) return;
     if (time < this._loop.end) return;
 
-    // Jump back to loop start
-    this.shifter.percentagePlayed = this._loop.start / this.buffer.duration;
+    this.seek(this._loop.start);
     this._loopCount++;
 
-    // Speed ramp: bump speed each loop iteration
     if (this._ramp.enabled) {
       this._speed = Math.min(
         this._ramp.startSpeed + this._loopCount * this._ramp.increment,
         this._ramp.endSpeed
       );
-      this.shifter.tempo = this._speed;
+      this.sendMsg(['tempo', this._speed]);
     }
 
     this.onLoopRestart?.(this._loopCount, this._speed);
   }
+}
 
-  private destroyShifter(): void {
-    if (this.shifter) {
-      this.shifter.off();
-      this.shifter.disconnect();
-      this.shifter = null;
-    }
-  }
+function semitonesToPitch(semitones: number): number {
+  return Math.pow(2, semitones / 12);
 }
