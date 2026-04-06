@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useMemo, useEffect } from 'react';
 import type { TrackInfo as TrackInfoType } from './types';
 import { useAudioEngine } from './hooks/useAudioEngine';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
@@ -98,6 +98,18 @@ function App() {
   );
 
   useKeyboardShortcuts(shortcutActions);
+
+  // Prevent trackpad/mouse scroll from changing range input values
+  useEffect(() => {
+    const prevent = (e: WheelEvent) => {
+      if ((e.target as HTMLElement).closest('input[type="range"]')) {
+        e.preventDefault();
+        (e.target as HTMLElement).blur();
+      }
+    };
+    document.addEventListener('wheel', prevent, { passive: false });
+    return () => document.removeEventListener('wheel', prevent);
+  }, []);
 
   const handleLoadBookmark = useCallback(
     (bookmark: { start: number; end: number }) => {

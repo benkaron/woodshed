@@ -1,6 +1,4 @@
-import {
-  PitchShifter,
-} from 'soundtouchjs';
+import { PitchShifter } from 'soundtouchjs';
 
 export interface LoopBounds {
   start: number;
@@ -14,280 +12,209 @@ export interface SpeedRampConfig {
   enabled: boolean;
 }
 
-type TimeUpdateCallback = (currentTime: number) => void;
-type LoopRestartCallback = (loopCount: number, currentSpeed: number) => void;
+type Callback<T extends unknown[]> = (...args: T) => void;
 
+/**
+ * AudioEngine — wraps Web Audio API + soundtouchjs PitchShifter.
+ *
+ * Design:
+ *  - AudioContext + EQ chain created once in constructor
+ *  - PitchShifter created per-track in load()
+ *  - play/pause = AudioContext resume/suspend (simplest reliable approach)
+ *  - Single setInterval tick for position tracking + loop checking
+ */
 export class AudioEngine {
-  private audioContext: AudioContext | null = null;
-  private audioBuffer: AudioBuffer | null = null;
+  private ctx: AudioContext;
   private shifter: PitchShifter | null = null;
+  private buffer: AudioBuffer | null = null;
 
-  // Audio graph nodes
-  private gainNode: GainNode | null = null;
-  private lowpassFilter: BiquadFilterNode | null = null;
-  private highpassFilter: BiquadFilterNode | null = null;
+  // Persistent audio nodes (created once, reused across tracks)
+  private lowpass: BiquadFilterNode;
+  private highpass: BiquadFilterNode;
+  private gain: GainNode;
 
-  // Playback state
-  private _isPlaying = false;
+  // State
+  private _playing = false;
   private _speed = 1.0;
-  private _pitch = 0; // semitones
+  private _pitch = 0;
   private _loop: LoopBounds | null = null;
-  private _lowpassFreq = 20000;
-  private _highpassFreq = 20;
+  private _videoId: string | null = null;
 
   // Speed ramp
-  private _speedRamp: SpeedRampConfig = {
+  private _ramp: SpeedRampConfig = {
     startSpeed: 0.5,
     endSpeed: 1.0,
     increment: 0.05,
     enabled: false,
   };
-  private _currentRampSpeed = 1.0;
   private _loopCount = 0;
 
-  // Position tracking
-  private _currentTime = 0;
-  private _duration = 0;
-  private positionUpdateInterval: ReturnType<typeof setInterval> | null = null;
+  // Position tick
+  private _tick: ReturnType<typeof setInterval> | null = null;
 
-  // Callbacks
-  private timeUpdateCallbacks: TimeUpdateCallback[] = [];
-  private loopRestartCallbacks: LoopRestartCallback[] = [];
+  // Callbacks (single listener each — the React hook is the only consumer)
+  onTimeUpdate: Callback<[number]> | null = null;
+  onPlayStateChange: Callback<[boolean]> | null = null;
+  onLoopRestart: Callback<[number, number]> | null = null;
 
-  // Track loaded video ID
-  private _videoId: string | null = null;
+  constructor() {
+    this.ctx = new AudioContext();
+
+    // Persistent EQ + gain chain (never destroyed)
+    this.lowpass = this.ctx.createBiquadFilter();
+    this.lowpass.type = 'lowpass';
+    this.lowpass.frequency.value = 20000;
+    this.lowpass.Q.value = 0.7071;
+
+    this.highpass = this.ctx.createBiquadFilter();
+    this.highpass.type = 'highpass';
+    this.highpass.frequency.value = 20;
+    this.highpass.Q.value = 0.7071;
+
+    this.gain = this.ctx.createGain();
+    this.gain.gain.value = 1.0;
+
+    // Wire: [shifter] → lowpass → highpass → gain → speakers
+    this.lowpass.connect(this.highpass);
+    this.highpass.connect(this.gain);
+    this.gain.connect(this.ctx.destination);
+
+    // Start suspended so nothing plays until explicitly told to
+    this.ctx.suspend();
+  }
+
+  // ── Getters ──────────────────────────────────────────────
 
   get isPlaying(): boolean {
-    return this._isPlaying;
+    return this._playing;
   }
-
   get currentTime(): number {
-    return this._currentTime;
+    return this.shifter?.timePlayed ?? 0;
   }
-
   get duration(): number {
-    return this._duration;
+    return this.buffer?.duration ?? 0;
   }
-
   get speed(): number {
     return this._speed;
   }
-
   get pitch(): number {
     return this._pitch;
   }
-
   get loop(): LoopBounds | null {
     return this._loop;
   }
-
-  get lowpassFreq(): number {
-    return this._lowpassFreq;
-  }
-
-  get highpassFreq(): number {
-    return this._highpassFreq;
-  }
-
   get speedRamp(): SpeedRampConfig {
-    return { ...this._speedRamp };
+    return { ...this._ramp };
   }
-
   get videoId(): string | null {
     return this._videoId;
   }
-
   getBuffer(): AudioBuffer | null {
-    return this.audioBuffer;
+    return this.buffer;
   }
+
+  // ── Load ─────────────────────────────────────────────────
 
   async load(videoId: string): Promise<{ duration: number }> {
-    // Clean up previous playback
-    this.stop();
+    // Stop anything currently playing
+    if (this._playing) this.pause();
     this.destroyShifter();
 
-    // Create audio context if needed
-    if (!this.audioContext) {
-      this.audioContext = new AudioContext();
-    }
+    // Context must be running to decode audio
+    await this.ctx.resume();
 
-    // Fetch audio stream from backend
-    const response = await fetch(`/api/stream/${videoId}`);
-    if (!response.ok) {
-      throw new Error(`Failed to fetch audio: ${response.statusText}`);
-    }
+    const res = await fetch(`/api/stream/${videoId}`);
+    if (!res.ok) throw new Error(`Failed to fetch audio: ${res.statusText}`);
 
-    const arrayBuffer = await response.arrayBuffer();
-    this.audioBuffer = await this.audioContext.decodeAudioData(arrayBuffer);
-    this._duration = this.audioBuffer.duration;
+    const raw = await res.arrayBuffer();
+    this.buffer = await this.ctx.decodeAudioData(raw);
     this._videoId = videoId;
-    this._currentTime = 0;
     this._loopCount = 0;
 
-    // Reset speed ramp
-    if (this._speedRamp.enabled) {
-      this._currentRampSpeed = this._speedRamp.startSpeed;
-      this._speed = this._currentRampSpeed;
+    // Reset speed for ramp if enabled
+    if (this._ramp.enabled) {
+      this._speed = this._ramp.startSpeed;
     }
 
-    this.setupAudioGraph();
-
-    return { duration: this._duration };
-  }
-
-  private setupAudioGraph(): void {
-    if (!this.audioContext || !this.audioBuffer) return;
-
-    this.destroyShifter();
-
-    // Create EQ filters
-    this.lowpassFilter = this.audioContext.createBiquadFilter();
-    this.lowpassFilter.type = 'lowpass';
-    this.lowpassFilter.frequency.value = this._lowpassFreq;
-    this.lowpassFilter.Q.value = 0.7071;
-
-    this.highpassFilter = this.audioContext.createBiquadFilter();
-    this.highpassFilter.type = 'highpass';
-    this.highpassFilter.frequency.value = this._highpassFreq;
-    this.highpassFilter.Q.value = 0.7071;
-
-    // Create gain node
-    this.gainNode = this.audioContext.createGain();
-    this.gainNode.gain.value = 1.0;
-
-    // Create PitchShifter from soundtouchjs
-    // PitchShifter(context, buffer, bufferSize, onEnd)
-    this.shifter = new PitchShifter(this.audioContext, this.audioBuffer, 4096, () => {
-      // Audio ended
-      this._isPlaying = false;
-      this.stopPositionTracking();
+    // Create PitchShifter for this track
+    this.shifter = new PitchShifter(this.ctx, this.buffer, 4096, () => {
+      // Song finished — pause
+      this.pause();
     });
-
-    // Set initial tempo and pitch
-    const effectiveSpeed = this._speedRamp.enabled ? this._currentRampSpeed : this._speed;
-    this.shifter.tempo = effectiveSpeed;
+    this.shifter.tempo = this._speed;
     this.shifter.pitchSemitones = this._pitch;
+    this.shifter.connect(this.lowpass);
 
-    // Connect: shifter → lowpass → highpass → gain → destination
-    this.shifter.connect(this.lowpassFilter);
-    this.lowpassFilter.connect(this.highpassFilter);
-    this.highpassFilter.connect(this.gainNode);
-    this.gainNode.connect(this.audioContext.destination);
+    // Freeze immediately so it doesn't auto-play
+    await this.ctx.suspend();
 
-    // Listen for position updates from the shifter
-    this.shifter.on('play', (detail: { timePlayed: number }) => {
-      this._currentTime = detail.timePlayed;
-      this.notifyTimeUpdate();
-      this.checkLoopBounds();
-    });
+    return { duration: this.buffer.duration };
   }
 
-  private checkLoopBounds(): void {
-    if (!this._loop || !this.shifter) return;
-
-    if (this._currentTime >= this._loop.end) {
-      // Jump back to loop start
-      this.seekInternal(this._loop.start);
-      this._loopCount++;
-
-      // Apply speed ramp if enabled
-      if (this._speedRamp.enabled) {
-        const newSpeed = Math.min(
-          this._speedRamp.startSpeed + this._loopCount * this._speedRamp.increment,
-          this._speedRamp.endSpeed
-        );
-        this._currentRampSpeed = newSpeed;
-        this._speed = newSpeed;
-        if (this.shifter) {
-          this.shifter.tempo = newSpeed;
-        }
-      }
-
-      this.notifyLoopRestart();
-    }
-  }
+  // ── Transport ────────────────────────────────────────────
 
   play(): void {
-    if (!this.audioContext || !this.shifter) return;
-
-    if (this.audioContext.state === 'suspended') {
-      this.audioContext.resume();
-    }
-
-    // If we had stopped, we need to rebuild the graph to start fresh
-    if (!this._isPlaying) {
-      this._isPlaying = true;
-      this.startPositionTracking();
-    }
+    if (!this.shifter || this._playing) return;
+    this.ctx.resume();
+    this._playing = true;
+    this.startTick();
+    this.onPlayStateChange?.(true);
   }
 
   pause(): void {
-    if (!this.audioContext) return;
-    this._isPlaying = false;
-    this.audioContext.suspend();
-    this.stopPositionTracking();
+    if (!this._playing) return;
+    this._playing = false;
+    this.stopTick();
+    this.ctx.suspend();
+    this.onPlayStateChange?.(false);
   }
 
-  private stop(): void {
-    this._isPlaying = false;
-    this.stopPositionTracking();
-    if (this.audioContext && this.audioContext.state !== 'closed') {
-      this.audioContext.suspend();
-    }
+  togglePlayPause(): void {
+    if (this._playing) this.pause();
+    else this.play();
   }
 
   seek(time: number): void {
-    const clampedTime = Math.max(0, Math.min(time, this._duration));
-    this.seekInternal(clampedTime);
+    if (!this.shifter || !this.buffer) return;
+    const clamped = Math.max(0, Math.min(time, this.buffer.duration));
+    this.shifter.percentagePlayed = clamped / this.buffer.duration;
+    // Fire an immediate time update so the UI reflects the seek
+    this.onTimeUpdate?.(clamped);
   }
 
-  private seekInternal(time: number): void {
-    if (!this.shifter || !this.audioContext) return;
-
-    const sampleRate = this.audioContext.sampleRate;
-    // PitchShifter uses percentagePlayed as a fraction (0-100)
-    const percentage = (time / this._duration) * 100;
-    this.shifter.percentagePlayed = percentage;
-    this._currentTime = time;
-    // Also update the sourcePosition directly for accuracy
-    const sourcePosition = Math.floor(time * sampleRate);
-    if (sourcePosition >= 0) {
-      this.shifter.sourcePosition = sourcePosition;
-      this.shifter.timePlayed = time;
-    }
-    this.notifyTimeUpdate();
-  }
+  // ── Speed / Pitch / EQ ──────────────────────────────────
 
   setSpeed(rate: number): void {
     this._speed = Math.max(0.25, Math.min(2.0, rate));
-    if (this.shifter) {
-      this.shifter.tempo = this._speed;
-    }
-    // If ramp is enabled, also update the ramp current speed
-    if (this._speedRamp.enabled) {
-      this._currentRampSpeed = this._speed;
-    }
+    if (this.shifter) this.shifter.tempo = this._speed;
   }
 
   setPitch(semitones: number): void {
     this._pitch = Math.max(-12, Math.min(12, semitones));
-    if (this.shifter) {
-      this.shifter.pitchSemitones = this._pitch;
-    }
+    if (this.shifter) this.shifter.pitchSemitones = this._pitch;
   }
+
+  setEQ(lowpassFreq: number, highpassFreq: number): void {
+    this.lowpass.frequency.value = lowpassFreq;
+    this.highpass.frequency.value = highpassFreq;
+  }
+
+  get lowpassFreq(): number {
+    return this.lowpass.frequency.value;
+  }
+  get highpassFreq(): number {
+    return this.highpass.frequency.value;
+  }
+
+  // ── Loop ─────────────────────────────────────────────────
 
   setLoop(start: number, end: number): void {
     if (start >= end) return;
     this._loop = { start, end };
     this._loopCount = 0;
-
-    // Reset speed ramp when loop changes
-    if (this._speedRamp.enabled) {
-      this._currentRampSpeed = this._speedRamp.startSpeed;
-      this._speed = this._currentRampSpeed;
-      if (this.shifter) {
-        this.shifter.tempo = this._currentRampSpeed;
-      }
+    if (this._ramp.enabled) {
+      this._speed = this._ramp.startSpeed;
+      if (this.shifter) this.shifter.tempo = this._speed;
     }
   }
 
@@ -296,82 +223,62 @@ export class AudioEngine {
     this._loopCount = 0;
   }
 
-  setEQ(lowpass: number, highpass: number): void {
-    this._lowpassFreq = lowpass;
-    this._highpassFreq = highpass;
-    if (this.lowpassFilter) {
-      this.lowpassFilter.frequency.value = lowpass;
-    }
-    if (this.highpassFilter) {
-      this.highpassFilter.frequency.value = highpass;
-    }
-  }
+  // ── Speed Ramp ───────────────────────────────────────────
 
   setSpeedRamp(config: Partial<SpeedRampConfig>): void {
-    this._speedRamp = { ...this._speedRamp, ...config };
-
-    if (this._speedRamp.enabled) {
-      this._currentRampSpeed = this._speedRamp.startSpeed;
-      this._speed = this._currentRampSpeed;
+    this._ramp = { ...this._ramp, ...config };
+    if (this._ramp.enabled) {
+      this._speed = this._ramp.startSpeed;
       this._loopCount = 0;
-      if (this.shifter) {
-        this.shifter.tempo = this._currentRampSpeed;
-      }
+      if (this.shifter) this.shifter.tempo = this._speed;
     }
   }
 
-  getPosition(): number {
-    return this._currentTime;
+  // ── Cleanup ──────────────────────────────────────────────
+
+  destroy(): void {
+    this.pause();
+    this.destroyShifter();
+    if (this.ctx.state !== 'closed') this.ctx.close();
   }
 
-  getDuration(): number {
-    return this._duration;
-  }
+  // ── Internal ─────────────────────────────────────────────
 
-  onTimeUpdate(callback: TimeUpdateCallback): () => void {
-    this.timeUpdateCallbacks.push(callback);
-    return () => {
-      this.timeUpdateCallbacks = this.timeUpdateCallbacks.filter((cb) => cb !== callback);
-    };
-  }
-
-  onLoopRestart(callback: LoopRestartCallback): () => void {
-    this.loopRestartCallbacks.push(callback);
-    return () => {
-      this.loopRestartCallbacks = this.loopRestartCallbacks.filter((cb) => cb !== callback);
-    };
-  }
-
-  private notifyTimeUpdate(): void {
-    for (const cb of this.timeUpdateCallbacks) {
-      cb(this._currentTime);
-    }
-  }
-
-  private notifyLoopRestart(): void {
-    for (const cb of this.loopRestartCallbacks) {
-      cb(this._loopCount, this._currentRampSpeed);
-    }
-  }
-
-  private startPositionTracking(): void {
-    this.stopPositionTracking();
-    // Fallback position tracking interval in case the shifter 'play' event
-    // doesn't fire frequently enough
-    this.positionUpdateInterval = setInterval(() => {
-      if (this._isPlaying && this.shifter) {
-        this._currentTime = this.shifter.timePlayed;
-        this.notifyTimeUpdate();
-        this.checkLoopBounds();
-      }
+  private startTick(): void {
+    this.stopTick();
+    this._tick = setInterval(() => {
+      if (!this.shifter || !this._playing) return;
+      const t = this.shifter.timePlayed;
+      this.onTimeUpdate?.(t);
+      this.checkLoop(t);
     }, 50);
   }
 
-  private stopPositionTracking(): void {
-    if (this.positionUpdateInterval) {
-      clearInterval(this.positionUpdateInterval);
-      this.positionUpdateInterval = null;
+  private stopTick(): void {
+    if (this._tick) {
+      clearInterval(this._tick);
+      this._tick = null;
     }
+  }
+
+  private checkLoop(time: number): void {
+    if (!this._loop || !this.shifter || !this.buffer) return;
+    if (time < this._loop.end) return;
+
+    // Jump back to loop start
+    this.shifter.percentagePlayed = this._loop.start / this.buffer.duration;
+    this._loopCount++;
+
+    // Speed ramp: bump speed each loop iteration
+    if (this._ramp.enabled) {
+      this._speed = Math.min(
+        this._ramp.startSpeed + this._loopCount * this._ramp.increment,
+        this._ramp.endSpeed
+      );
+      this.shifter.tempo = this._speed;
+    }
+
+    this.onLoopRestart?.(this._loopCount, this._speed);
   }
 
   private destroyShifter(): void {
@@ -380,29 +287,5 @@ export class AudioEngine {
       this.shifter.disconnect();
       this.shifter = null;
     }
-    if (this.lowpassFilter) {
-      this.lowpassFilter.disconnect();
-      this.lowpassFilter = null;
-    }
-    if (this.highpassFilter) {
-      this.highpassFilter.disconnect();
-      this.highpassFilter = null;
-    }
-    if (this.gainNode) {
-      this.gainNode.disconnect();
-      this.gainNode = null;
-    }
-  }
-
-  destroy(): void {
-    this.stop();
-    this.destroyShifter();
-    if (this.audioContext && this.audioContext.state !== 'closed') {
-      this.audioContext.close();
-    }
-    this.audioContext = null;
-    this.audioBuffer = null;
-    this.timeUpdateCallbacks = [];
-    this.loopRestartCallbacks = [];
   }
 }

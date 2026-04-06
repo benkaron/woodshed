@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from typing import Dict, Optional
+import subprocess
+from pathlib import Path
+from typing import Optional
 
-import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from app.audio import VideoNotFoundError, get_audio_stream_url, resolve_video
+from app.audio import VideoNotFoundError, resolve_video
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -29,6 +31,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Cache directory for downloaded audio — use /tmp explicitly for consistency
+# (Python's tempfile.gettempdir() returns /var/folders/... on macOS)
+CACHE_DIR = Path("/tmp/woodshed-audio")
+CACHE_DIR.mkdir(exist_ok=True)
 
 
 # -- Request / Response models ------------------------------------------------
@@ -63,49 +70,73 @@ async def resolve(req: ResolveRequest) -> ResolveResponse:
 
 
 @app.get("/api/stream/{video_id}")
-async def stream(video_id: str) -> StreamingResponse:
-    """Proxy the audio stream for a YouTube video to avoid CORS issues."""
-    try:
-        audio_url = get_audio_stream_url(video_id)
-    except VideoNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except Exception as exc:
-        logger.exception("Unexpected error getting stream for %s", video_id)
-        raise HTTPException(status_code=500, detail="Failed to get audio stream") from exc
+async def stream(video_id: str) -> FileResponse:
+    """Download audio via yt-dlp and serve the file."""
+    # Check cache first
+    cached = CACHE_DIR / f"{video_id}.m4a"
+    if not cached.exists():
+        # Also check for other formats yt-dlp might produce
+        for ext in ("m4a", "webm", "opus", "mp3"):
+            candidate = CACHE_DIR / f"{video_id}.{ext}"
+            if candidate.exists():
+                cached = candidate
+                break
 
-    # Stream the audio from YouTube through our server.
-    client = httpx.AsyncClient()
+    if not cached.exists():
+        # Use yt-dlp CLI to download — it handles cookies/tokens/retries properly
+        url = f"https://www.youtube.com/watch?v={video_id}"
+        output_template = str(CACHE_DIR / f"{video_id}.%(ext)s")
+        cmd = [
+            "yt-dlp",
+            "-f", "bestaudio",
+            "-o", output_template,
+            "--no-playlist",
+            "--no-post-overwrites",
+            url,
+        ]
 
-    try:
-        upstream = await client.send(
-            client.build_request("GET", audio_url),
-            stream=True,
-        )
-    except httpx.HTTPError as exc:
-        await client.aclose()
-        logger.warning("Failed to connect to upstream audio: %s", exc)
-        raise HTTPException(status_code=502, detail="Failed to fetch audio stream") from exc
-
-    content_type = upstream.headers.get("content-type", "audio/mpeg")
-    content_length = upstream.headers.get("content-length")
-
-    headers: dict[str, str] = {
-        "Accept-Ranges": "bytes",
-        "Content-Type": content_type,
-    }
-    if content_length:
-        headers["Content-Length"] = content_length
-
-    async def generate():
         try:
-            async for chunk in upstream.aiter_bytes(chunk_size=64 * 1024):
-                yield chunk
-        finally:
-            await upstream.aclose()
-            await client.aclose()
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate()
 
-    return StreamingResponse(
-        generate(),
-        status_code=upstream.status_code,
-        headers=headers,
+            if proc.returncode != 0:
+                logger.error("yt-dlp failed: %s", stderr.decode())
+                raise HTTPException(
+                    status_code=502,
+                    detail="Failed to download audio",
+                )
+        except FileNotFoundError:
+            raise HTTPException(
+                status_code=500,
+                detail="yt-dlp not found — install it with: brew install yt-dlp",
+            )
+
+        # Find the downloaded file (yt-dlp picks the extension)
+        for ext in ("m4a", "webm", "opus", "mp3", "ogg"):
+            candidate = CACHE_DIR / f"{video_id}.{ext}"
+            if candidate.exists():
+                cached = candidate
+                break
+
+        if not cached.exists():
+            raise HTTPException(status_code=500, detail="Download succeeded but file not found")
+
+    # Determine content type
+    content_types = {
+        ".m4a": "audio/mp4",
+        ".webm": "audio/webm",
+        ".opus": "audio/ogg",
+        ".mp3": "audio/mpeg",
+        ".ogg": "audio/ogg",
+    }
+    content_type = content_types.get(cached.suffix, "audio/mpeg")
+
+    return FileResponse(
+        cached,
+        media_type=content_type,
+        headers={"Accept-Ranges": "bytes"},
     )

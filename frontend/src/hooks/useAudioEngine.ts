@@ -2,34 +2,7 @@ import { useState, useRef, useCallback, useEffect } from 'react';
 import { AudioEngine } from '../lib/AudioEngine';
 import type { LoopBounds, SpeedRampConfig } from '../lib/AudioEngine';
 
-export interface AudioEngineState {
-  isPlaying: boolean;
-  isLoading: boolean;
-  currentTime: number;
-  duration: number;
-  speed: number;
-  pitch: number;
-  loop: LoopBounds | null;
-  eq: { lowpass: number; highpass: number };
-  speedRamp: SpeedRampConfig;
-}
-
-export interface AudioEngineActions {
-  load: (videoId: string) => Promise<void>;
-  play: () => void;
-  pause: () => void;
-  togglePlayPause: () => void;
-  seek: (time: number) => void;
-  setSpeed: (rate: number) => void;
-  setPitch: (semitones: number) => void;
-  setLoop: (start: number, end: number) => void;
-  clearLoop: () => void;
-  setEQ: (lowpass: number, highpass: number) => void;
-  setSpeedRamp: (config: Partial<SpeedRampConfig>) => void;
-  getBuffer: () => AudioBuffer | null;
-}
-
-export function useAudioEngine(): AudioEngineState & AudioEngineActions {
+export function useAudioEngine() {
   const engineRef = useRef<AudioEngine | null>(null);
 
   const [isPlaying, setIsPlaying] = useState(false);
@@ -47,31 +20,28 @@ export function useAudioEngine(): AudioEngineState & AudioEngineActions {
     enabled: false,
   });
 
-  // Initialize engine on mount
+  // Create engine once
   useEffect(() => {
-    engineRef.current = new AudioEngine();
-    const engine = engineRef.current;
+    const engine = new AudioEngine();
+    engineRef.current = engine;
 
-    const unsubTime = engine.onTimeUpdate((time) => {
-      setCurrentTime(time);
-    });
-
-    const unsubLoop = engine.onLoopRestart((_count, currentSpeed) => {
-      setSpeedState(currentSpeed);
-    });
+    // Wire callbacks
+    engine.onTimeUpdate = (time) => setCurrentTime(time);
+    engine.onPlayStateChange = (playing) => setIsPlaying(playing);
+    engine.onLoopRestart = (_count, currentSpeed) => setSpeedState(currentSpeed);
 
     return () => {
-      unsubTime();
-      unsubLoop();
       engine.destroy();
+      engineRef.current = null;
     };
   }, []);
 
   const load = useCallback(async (videoId: string) => {
-    if (!engineRef.current) return;
+    const engine = engineRef.current;
+    if (!engine) return;
     setIsLoading(true);
     try {
-      const { duration: dur } = await engineRef.current.load(videoId);
+      const { duration: dur } = await engine.load(videoId);
       setDuration(dur);
       setCurrentTime(0);
       setIsPlaying(false);
@@ -81,73 +51,54 @@ export function useAudioEngine(): AudioEngineState & AudioEngineActions {
     }
   }, []);
 
-  const play = useCallback(() => {
-    if (!engineRef.current) return;
-    engineRef.current.play();
-    setIsPlaying(true);
-  }, []);
-
-  const pause = useCallback(() => {
-    if (!engineRef.current) return;
-    engineRef.current.pause();
-    setIsPlaying(false);
-  }, []);
-
   const togglePlayPause = useCallback(() => {
-    if (!engineRef.current) return;
-    if (engineRef.current.isPlaying) {
-      engineRef.current.pause();
-      setIsPlaying(false);
-    } else {
-      engineRef.current.play();
-      setIsPlaying(true);
-    }
+    engineRef.current?.togglePlayPause();
   }, []);
 
   const seek = useCallback((time: number) => {
-    if (!engineRef.current) return;
-    engineRef.current.seek(time);
-    setCurrentTime(time);
+    engineRef.current?.seek(time);
   }, []);
 
   const setSpeed = useCallback((rate: number) => {
-    if (!engineRef.current) return;
-    engineRef.current.setSpeed(rate);
-    setSpeedState(engineRef.current.speed);
+    const engine = engineRef.current;
+    if (!engine) return;
+    engine.setSpeed(rate);
+    setSpeedState(engine.speed);
   }, []);
 
   const setPitch = useCallback((semitones: number) => {
-    if (!engineRef.current) return;
-    engineRef.current.setPitch(semitones);
-    setPitchState(engineRef.current.pitch);
+    const engine = engineRef.current;
+    if (!engine) return;
+    engine.setPitch(semitones);
+    setPitchState(engine.pitch);
   }, []);
 
   const setLoop = useCallback((start: number, end: number) => {
-    if (!engineRef.current) return;
-    engineRef.current.setLoop(start, end);
-    setLoopState(engineRef.current.loop);
-    if (speedRamp.enabled) {
-      setSpeedState(engineRef.current.speed);
+    const engine = engineRef.current;
+    if (!engine) return;
+    engine.setLoop(start, end);
+    setLoopState(engine.loop);
+    if (engine.speedRamp.enabled) {
+      setSpeedState(engine.speed);
     }
-  }, [speedRamp.enabled]);
+  }, []);
 
   const clearLoop = useCallback(() => {
-    if (!engineRef.current) return;
-    engineRef.current.clearLoop();
+    engineRef.current?.clearLoop();
     setLoopState(null);
   }, []);
 
   const setEQ = useCallback((lowpass: number, highpass: number) => {
-    if (!engineRef.current) return;
-    engineRef.current.setEQ(lowpass, highpass);
+    engineRef.current?.setEQ(lowpass, highpass);
     setEqState({ lowpass, highpass });
   }, []);
 
   const setSpeedRamp = useCallback((config: Partial<SpeedRampConfig>) => {
-    if (!engineRef.current) return;
-    engineRef.current.setSpeedRamp(config);
-    setSpeedRampState(engineRef.current.speedRamp);
-    setSpeedState(engineRef.current.speed);
+    const engine = engineRef.current;
+    if (!engine) return;
+    engine.setSpeedRamp(config);
+    setSpeedRampState(engine.speedRamp);
+    setSpeedState(engine.speed);
   }, []);
 
   const getBuffer = useCallback(() => {
@@ -155,6 +106,7 @@ export function useAudioEngine(): AudioEngineState & AudioEngineActions {
   }, []);
 
   return {
+    // State
     isPlaying,
     isLoading,
     currentTime,
@@ -164,9 +116,8 @@ export function useAudioEngine(): AudioEngineState & AudioEngineActions {
     loop,
     eq,
     speedRamp,
+    // Actions
     load,
-    play,
-    pause,
     togglePlayPause,
     seek,
     setSpeed,

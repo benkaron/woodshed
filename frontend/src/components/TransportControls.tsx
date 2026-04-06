@@ -1,3 +1,5 @@
+import { useState } from 'react';
+
 interface TransportControlsProps {
   isPlaying: boolean;
   currentTime: number;
@@ -19,7 +21,10 @@ export function TransportControls({
   onTogglePlay,
   onSeek,
 }: TransportControlsProps) {
-  const progress = duration > 0 ? (currentTime / duration) * 100 : 0;
+  const [isSeeking, setIsSeeking] = useState(false);
+  const [seekValue, setSeekValue] = useState(0);
+  const displayTime = isSeeking ? seekValue : currentTime;
+  const progress = duration > 0 ? (displayTime / duration) * 100 : 0;
 
   return (
     <div className="flex items-center gap-4">
@@ -44,7 +49,7 @@ export function TransportControls({
       </button>
 
       <span className="text-white font-mono text-sm w-12 text-right shrink-0">
-        {formatTime(currentTime)}
+        {formatTime(displayTime)}
       </span>
 
       <div className="flex-1 relative group">
@@ -53,8 +58,24 @@ export function TransportControls({
           min={0}
           max={duration || 1}
           step={0.1}
-          value={currentTime}
-          onChange={(e) => onSeek(parseFloat(e.target.value))}
+          value={displayTime}
+          onPointerDown={() => {
+            setIsSeeking(true);
+            setSeekValue(currentTime);
+          }}
+          onChange={(e) => {
+            const val = parseFloat(e.target.value);
+            setSeekValue(val);
+            if (isSeeking) return; // defer actual seek until release
+            onSeek(val);
+          }}
+          onPointerUp={() => {
+            if (isSeeking) {
+              onSeek(seekValue);
+              setIsSeeking(false);
+            }
+          }}
+          onPointerCancel={() => setIsSeeking(false)}
           className="w-full h-1.5 bg-gray-700 rounded-full appearance-none cursor-pointer
                      [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3.5
                      [&::-webkit-slider-thumb]:h-3.5 [&::-webkit-slider-thumb]:rounded-full

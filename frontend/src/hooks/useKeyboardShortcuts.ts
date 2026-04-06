@@ -14,13 +14,14 @@ interface KeyboardShortcutActions {
 export function useKeyboardShortcuts(actions: KeyboardShortcutActions): void {
   const handleKeyDown = useCallback(
     (event: KeyboardEvent) => {
-      // Don't capture shortcuts when typing in inputs
+      // Don't capture shortcuts when typing in text inputs
       const target = event.target as HTMLElement;
-      if (
-        target.tagName === 'INPUT' ||
+      const isTextInput =
+        (target.tagName === 'INPUT' &&
+          (target as HTMLInputElement).type !== 'range') ||
         target.tagName === 'TEXTAREA' ||
-        target.isContentEditable
-      ) {
+        target.isContentEditable;
+      if (isTextInput) {
         return;
       }
 

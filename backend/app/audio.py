@@ -47,8 +47,11 @@ def resolve_video(url: str) -> Dict[str, Any]:
     }
 
 
-def get_audio_stream_url(video_id: str) -> str:
-    """Get the direct audio stream URL for a given video ID."""
+def get_audio_stream_info(video_id: str) -> Dict[str, Any]:
+    """Get the direct audio stream URL and required headers for a given video ID.
+
+    Returns a dict with 'url' and 'headers' keys.
+    """
     url = f"https://www.youtube.com/watch?v={video_id}"
     opts = {**_BASE_OPTS}
 
@@ -62,7 +65,12 @@ def get_audio_stream_url(video_id: str) -> str:
     if info is None:
         raise VideoNotFoundError(f"No info returned for video {video_id}")
 
+    # Extract headers that YouTube requires for the audio URL
+    http_headers: Dict[str, str] = info.get("http_headers") or {}
+
     audio_url: str | None = info.get("url")
+    best_format: Dict[str, Any] | None = None
+
     if not audio_url:
         # Fall back to picking the best audio format from the formats list.
         formats = info.get("formats") or []
@@ -73,7 +81,10 @@ def get_audio_stream_url(video_id: str) -> str:
         if not audio_formats:
             raise VideoNotFoundError(f"No audio stream found for video {video_id}")
         # Prefer highest audio bitrate.
-        best = max(audio_formats, key=lambda f: f.get("abr") or 0)
-        audio_url = best["url"]
+        best_format = max(audio_formats, key=lambda f: f.get("abr") or 0)
+        audio_url = best_format["url"]
+        # Per-format headers override top-level headers
+        if best_format.get("http_headers"):
+            http_headers = best_format["http_headers"]
 
-    return audio_url
+    return {"url": audio_url, "headers": http_headers}
