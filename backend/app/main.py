@@ -89,6 +89,7 @@ async def stream(video_id: str) -> FileResponse:
         cmd = [
             "yt-dlp",
             "-f", "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
+            "--extractor-args", "youtube:player_client=android_vr,default",
             "-o", output_template,
             "--no-playlist",
             "--no-post-overwrites",

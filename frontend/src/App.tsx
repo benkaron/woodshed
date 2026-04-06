@@ -21,33 +21,34 @@ function App() {
 
   const { bookmarks, saveBookmark, deleteBookmark } = useBookmarks(track?.id ?? null);
 
+  const [isLoading, setIsLoading] = useState(false);
+
   const handleLoad = useCallback(
     async (videoId: string) => {
       setLoadError(null);
+      setIsLoading(true);
       try {
-        // Fetch track info from backend
+        // Fetch metadata and audio in parallel
         const url = `https://www.youtube.com/watch?v=${videoId}`;
-        let trackInfo: TrackInfoType | null = null;
-        try {
-          const infoRes = await fetch('/api/resolve', {
+        const [trackInfo] = await Promise.all([
+          fetch('/api/resolve', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ url }),
-          });
-          if (infoRes.ok) {
-            const data = await infoRes.json();
-            trackInfo = {
-              id: data.video_id,
-              title: data.title,
-              duration: data.duration ?? 0,
-              thumbnail: data.thumbnail,
-            };
-          }
-        } catch {
-          // Resolve may fail; continue with placeholder
-        }
-
-        await engine.load(videoId);
+          })
+            .then(async (res) => {
+              if (!res.ok) return null;
+              const data = await res.json();
+              return {
+                id: data.video_id,
+                title: data.title,
+                duration: data.duration ?? 0,
+                thumbnail: data.thumbnail,
+              } as TrackInfoType;
+            })
+            .catch(() => null),
+          engine.load(videoId),
+        ]);
 
         setTrack(
           trackInfo ?? {
@@ -63,6 +64,8 @@ function App() {
         const message =
           err instanceof Error ? err.message : 'Failed to load track';
         setLoadError(message);
+      } finally {
+        setIsLoading(false);
       }
     },
     [engine]
@@ -139,7 +142,7 @@ function App() {
         </header>
 
         {/* URL Input */}
-        <URLInput onLoad={handleLoad} isLoading={engine.isLoading} />
+        <URLInput onLoad={handleLoad} isLoading={isLoading} />
 
         {loadError && (
           <div className="bg-red-900/30 border border-red-700/50 rounded-lg px-4 py-3 text-red-300 text-sm">
