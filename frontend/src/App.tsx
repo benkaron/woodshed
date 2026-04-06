@@ -125,21 +125,21 @@ function App() {
   return (
     <div className="min-h-screen bg-gray-900 text-gray-100">
       <div className="max-w-5xl mx-auto px-4 py-6 flex flex-col gap-5">
-        {/* Header */}
-        <header className="flex items-center gap-3">
-          <h1 className="text-2xl font-bold text-white tracking-tight">
-            Woodshed
-          </h1>
-          <span className="text-gray-500 text-sm">
-            YouTube practice tool for musicians
-          </span>
+        {/* Header + URL Input */}
+        <header className="flex flex-col gap-4">
+          <div className="flex items-baseline gap-2">
+            <h1 className="text-xl font-semibold text-white tracking-tight">
+              Woodshed
+            </h1>
+            <span className="text-gray-600 text-xs tracking-wide">
+              practice tool
+            </span>
+          </div>
+          <URLInput onLoad={handleLoad} isLoading={isLoading} loadedVideoId={track?.id ?? null} />
         </header>
 
-        {/* URL Input */}
-        <URLInput onLoad={handleLoad} isLoading={isLoading} />
-
         {loadError && (
-          <div className="bg-red-900/30 border border-red-700/50 rounded-lg px-4 py-3 text-red-300 text-sm">
+          <div className="bg-red-900/20 border border-red-800/30 rounded-xl px-4 py-3 text-red-400 text-sm">
             {loadError}
           </div>
         )}

@@ -25,9 +25,15 @@ export function TrackInfo({ track }: TrackInfoProps) {
           className="w-64 h-64 rounded-xl object-cover shadow-2xl shadow-black/50"
         />
       )}
-      <h2 className="text-white font-semibold text-xl text-center max-w-lg leading-snug">
+      <a
+        href={`https://www.youtube.com/watch?v=${track.id}`}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="text-white font-semibold text-xl text-center max-w-lg leading-snug
+                   hover:text-blue-400 transition-colors"
+      >
         {track.title}
-      </h2>
+      </a>
     </div>
   );
 }
