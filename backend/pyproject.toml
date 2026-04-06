@@ -1,0 +1,11 @@
+[project]
+name = "woodshed-backend"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.9"
+dependencies = [
+    "fastapi>=0.128.8",
+    "httpx>=0.28.1",
+    "uvicorn>=0.39.0",
+    "yt-dlp>=2025.10.14",
+]
