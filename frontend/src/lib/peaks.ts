@@ -1,32 +1,37 @@
 /**
- * Extract normalized peak amplitudes from an AudioBuffer for waveform display.
+ * Extract smoothed RMS energy from an AudioBuffer for waveform display.
+ * RMS (root mean square) gives a naturally smoother energy curve than peak values.
  * Returns an array of values between 0 and 1.
  */
-export function extractPeaks(buffer: AudioBuffer, barCount: number): number[] {
+export function extractPeaks(buffer: AudioBuffer, count: number): number[] {
   const channel = buffer.getChannelData(0);
-  const samplesPerBar = Math.floor(channel.length / barCount);
-  const peaks: number[] = [];
-
+  const samplesPerBin = Math.floor(channel.length / count);
+  const raw: number[] = [];
   let globalMax = 0;
 
-  for (let i = 0; i < barCount; i++) {
-    const start = i * samplesPerBar;
-    const end = Math.min(start + samplesPerBar, channel.length);
-    let max = 0;
+  for (let i = 0; i < count; i++) {
+    const start = i * samplesPerBin;
+    const end = Math.min(start + samplesPerBin, channel.length);
+    let sum = 0;
     for (let j = start; j < end; j++) {
-      const abs = Math.abs(channel[j]);
-      if (abs > max) max = abs;
+      sum += channel[j] * channel[j];
     }
-    peaks.push(max);
-    if (max > globalMax) globalMax = max;
+    const rms = Math.sqrt(sum / (end - start));
+    raw.push(rms);
+    if (rms > globalMax) globalMax = rms;
   }
 
   // Normalize to 0-1
   if (globalMax > 0) {
-    for (let i = 0; i < peaks.length; i++) {
-      peaks[i] = peaks[i] / globalMax;
+    for (let i = 0; i < raw.length; i++) {
+      raw[i] = raw[i] / globalMax;
     }
   }
 
-  return peaks;
+  // Apply a slight power curve to boost quiet sections for visual balance
+  for (let i = 0; i < raw.length; i++) {
+    raw[i] = Math.pow(raw[i], 0.7);
+  }
+
+  return raw;
 }

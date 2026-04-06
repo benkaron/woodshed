@@ -17,16 +17,122 @@ function formatTime(seconds: number): string {
   return `${mins}:${secs.toString().padStart(2, '0')}`;
 }
 
-const BAR_WIDTH = 3;
-const BAR_GAP = 1;
-const WAVEFORM_HEIGHT = 48;
-const MIN_BAR_HEIGHT = 2;
+const WAVEFORM_HEIGHT = 64;
 
-// Colors
-const COLOR_PLAYED = '#3b82f6';       // blue-500
-const COLOR_UNPLAYED = '#4b5563';     // gray-600
-const COLOR_LOOP_PLAYED = '#d97706';  // amber-600 (bright)
-const COLOR_LOOP_UNPLAYED = '#78350f'; // amber-900 (muted, still reads as loop)
+/**
+ * Draw a smooth mirrored waveform as thin bezier stroke lines.
+ * Minimal, modern — no fill, just the outline.
+ */
+function drawWaveform(
+  ctx: CanvasRenderingContext2D,
+  peaks: number[],
+  width: number,
+  height: number,
+  progressFrac: number,
+  loop: LoopBounds | null,
+  duration: number
+) {
+  ctx.clearRect(0, 0, width, height);
+
+  const mid = height / 2;
+  const amp = mid - 4;
+  const n = peaks.length;
+  const step = width / n;
+
+  // Catmull-Rom spline through all points — guaranteed smooth tangents
+  function catmullRomPath(pts: { x: number; y: number }[], close: boolean): Path2D {
+    const path = new Path2D();
+    if (pts.length < 2) return path;
+
+    path.moveTo(pts[0].x, pts[0].y);
+
+    for (let i = 0; i < pts.length - 1; i++) {
+      const p0 = pts[Math.max(0, i - 1)];
+      const p1 = pts[i];
+      const p2 = pts[i + 1];
+      const p3 = pts[Math.min(pts.length - 1, i + 2)];
+
+      // Catmull-Rom to cubic bezier conversion (tension = 0 for smooth)
+      const cp1x = p1.x + (p2.x - p0.x) / 6;
+      const cp1y = p1.y + (p2.y - p0.y) / 6;
+      const cp2x = p2.x - (p3.x - p1.x) / 6;
+      const cp2y = p2.y - (p3.y - p1.y) / 6;
+
+      path.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, p2.x, p2.y);
+    }
+
+    if (close) {
+      path.lineTo(width, height);
+      path.lineTo(0, height);
+      path.closePath();
+    }
+
+    return path;
+  }
+
+  // Build points
+  const pts: { x: number; y: number }[] = [];
+  for (let i = 0; i < n; i++) {
+    pts.push({ x: i * step, y: mid - peaks[i] * amp });
+  }
+
+  function buildWaveLine(): Path2D {
+    return catmullRomPath(pts, false);
+  }
+
+  function buildWaveFill(): Path2D {
+    return catmullRomPath(pts, true);
+  }
+
+  const waveLine = buildWaveLine();
+  const waveFill = buildWaveFill();
+
+  const progressX = progressFrac * width;
+  const loopStartX = loop && duration > 0 ? (loop.start / duration) * width : -1;
+  const loopEndX = loop && duration > 0 ? (loop.end / duration) * width : -1;
+  const hasLoop = loopStartX >= 0 && loopEndX >= 0;
+
+  // Helper: stroke both lines clipped to a horizontal region
+  function strokeRegion(x1: number, x2: number, color: string, lineWidth: number, alpha: number, fillAlpha: number = 0) {
+    if (x2 <= x1) return;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(x1, 0, x2 - x1, height);
+    ctx.clip();
+    ctx.globalAlpha = alpha;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = lineWidth;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    // Gradient fill under the curve
+    const grad = ctx.createLinearGradient(0, mid - amp, 0, height);
+    grad.addColorStop(0, color);
+    grad.addColorStop(1, 'transparent');
+    ctx.fillStyle = grad;
+    ctx.globalAlpha = fillAlpha;
+    ctx.fill(waveFill);
+
+    // Stroke the line on top
+    ctx.strokeStyle = color;
+    ctx.lineWidth = lineWidth;
+    ctx.globalAlpha = alpha;
+    ctx.stroke(waveLine);
+
+    ctx.restore();
+  }
+
+  if (hasLoop) {
+    strokeRegion(0, Math.min(progressX, loopStartX), '#60a5fa', 2, 0.9, 0.22);
+    strokeRegion(Math.max(progressX, 0), loopStartX, '#6b7280', 1.5, 0.25, 0.06);
+    strokeRegion(loopStartX, Math.min(progressX, loopEndX), '#f59e0b', 2, 0.9, 0.25);
+    strokeRegion(Math.max(progressX, loopStartX), loopEndX, '#b45309', 1.5, 0.35, 0.1);
+    strokeRegion(loopEndX, Math.min(progressX, width), '#60a5fa', 2, 0.9, 0.22);
+    strokeRegion(Math.max(progressX, loopEndX), width, '#6b7280', 1.5, 0.25, 0.06);
+  } else {
+    strokeRegion(0, progressX, '#60a5fa', 2, 0.85, 0.22);
+    strokeRegion(progressX, width, '#6b7280', 1.5, 0.2, 0.06);
+  }
+}
 
 export function TransportControls({
   isPlaying,
@@ -44,7 +150,6 @@ export function TransportControls({
   const [canvasWidth, setCanvasWidth] = useState(0);
   const displayTime = isSeeking ? seekValue : currentTime;
 
-  // Measure container width
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -55,8 +160,7 @@ export function TransportControls({
     return () => observer.disconnect();
   }, []);
 
-  // Draw waveform
-  const drawWaveform = useCallback(() => {
+  const render = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas || !peaks || canvasWidth === 0) return;
 
@@ -69,57 +173,14 @@ export function TransportControls({
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
     ctx.scale(dpr, dpr);
-    ctx.clearRect(0, 0, canvasWidth, WAVEFORM_HEIGHT);
-
-    const barStep = BAR_WIDTH + BAR_GAP;
-    const barCount = peaks.length;
-    const totalBarsWidth = barCount * barStep;
-    const scale = canvasWidth / totalBarsWidth;
 
     const progressFrac = duration > 0 ? displayTime / duration : 0;
-    const progressX = progressFrac * canvasWidth;
-
-    const loopStartX = loop && duration > 0 ? (loop.start / duration) * canvasWidth : null;
-    const loopEndX = loop && duration > 0 ? (loop.end / duration) * canvasWidth : null;
-
-    for (let i = 0; i < barCount; i++) {
-      const x = i * barStep * scale;
-      const w = BAR_WIDTH * scale;
-      const h = Math.max(MIN_BAR_HEIGHT, peaks[i] * (WAVEFORM_HEIGHT - 4));
-      const y = (WAVEFORM_HEIGHT - h) / 2;
-
-      // Determine color based on position
-      const barCenter = x + w / 2;
-      const inLoop = loopStartX !== null && loopEndX !== null &&
-                     barCenter >= loopStartX && barCenter <= loopEndX;
-      const played = barCenter <= progressX;
-
-      if (inLoop && played) {
-        ctx.fillStyle = COLOR_LOOP_PLAYED;
-      } else if (inLoop) {
-        ctx.fillStyle = COLOR_LOOP_UNPLAYED;
-      } else if (played) {
-        ctx.fillStyle = COLOR_PLAYED;
-      } else {
-        ctx.fillStyle = COLOR_UNPLAYED;
-      }
-
-      ctx.beginPath();
-      ctx.roundRect(x, y, w, h, 1);
-      ctx.fill();
-    }
+    drawWaveform(ctx, peaks, canvasWidth, WAVEFORM_HEIGHT, progressFrac, loop, duration);
   }, [peaks, canvasWidth, displayTime, duration, loop]);
 
   useEffect(() => {
-    drawWaveform();
-  }, [drawWaveform]);
-
-  // Handle click/drag on the waveform to seek
-  const handleWaveformSeek = (e: React.PointerEvent<HTMLDivElement>) => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    const frac = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    onSeek(frac * duration);
-  };
+    render();
+  }, [render]);
 
   return (
     <div className="flex flex-col gap-2 px-2">
@@ -130,7 +191,10 @@ export function TransportControls({
         onPointerDown={(e) => {
           e.currentTarget.setPointerCapture(e.pointerId);
           setIsSeeking(true);
-          handleWaveformSeek(e);
+          const rect = e.currentTarget.getBoundingClientRect();
+          const frac = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+          setSeekValue(frac * duration);
+          onSeek(frac * duration);
         }}
         onPointerMove={(e) => {
           if (!isSeeking) return;
@@ -151,22 +215,24 @@ export function TransportControls({
         {peaks ? (
           <canvas
             ref={canvasRef}
-            className="w-full rounded opacity-80 group-hover:opacity-100 transition-opacity"
+            className="w-full rounded-lg opacity-85 group-hover:opacity-100 transition-opacity"
             style={{ height: WAVEFORM_HEIGHT }}
           />
         ) : (
           <div
-            className="w-full bg-gray-800 rounded"
+            className="w-full bg-gray-800/30 rounded-lg"
             style={{ height: WAVEFORM_HEIGHT }}
           />
         )}
 
-        {/* Playhead line */}
+        {/* Playhead */}
         {duration > 0 && (
           <div
-            className="absolute top-0 bottom-0 w-0.5 bg-white/80 pointer-events-none"
+            className="absolute top-0 bottom-0 pointer-events-none"
             style={{ left: `${(displayTime / duration) * 100}%` }}
-          />
+          >
+            <div className="w-[2px] h-full bg-white rounded-full shadow-[0_0_6px_rgba(255,255,255,0.4)]" />
+          </div>
         )}
       </div>
 
@@ -177,13 +243,12 @@ export function TransportControls({
         </span>
 
         <div className="flex items-center gap-3">
-          {/* Jump to loop start */}
           {loop && (
             <button
               onClick={() => onSeek(loop.start)}
               className="w-10 h-10 flex items-center justify-center rounded-full
-                         bg-gray-700 hover:bg-gray-600 text-amber-400
-                         transition-colors"
+                         bg-gray-800 hover:bg-gray-700 text-amber-400
+                         transition-colors border border-gray-700"
               title="Jump to loop start"
             >
               <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
@@ -192,13 +257,12 @@ export function TransportControls({
             </button>
           )}
 
-          {/* Play/pause button */}
           <button
             onClick={onTogglePlay}
             disabled={duration === 0}
             className="w-14 h-14 flex items-center justify-center rounded-full
-                       bg-white hover:bg-gray-200 disabled:bg-gray-700 disabled:text-gray-500
-                       text-gray-900 transition-colors"
+                       bg-white hover:bg-gray-100 disabled:bg-gray-700 disabled:text-gray-500
+                       text-gray-900 transition-all shadow-lg shadow-white/10"
             title={isPlaying ? 'Pause (Space)' : 'Play (Space)'}
           >
             {isPlaying ? (
@@ -213,7 +277,6 @@ export function TransportControls({
             )}
           </button>
 
-          {/* Spacer to keep play centered when loop button is showing */}
           {loop && <div className="w-10" />}
         </div>
 

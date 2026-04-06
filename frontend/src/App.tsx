@@ -60,7 +60,7 @@ function App() {
         );
 
         const buf = engine.getBuffer();
-        if (buf) setPeaks(extractPeaks(buf, 200));
+        if (buf) setPeaks(extractPeaks(buf, 80));
       } catch (err) {
         const message =
           err instanceof Error ? err.message : 'Failed to load track';
