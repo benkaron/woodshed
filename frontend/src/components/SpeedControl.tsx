@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import type { SpeedRampConfig } from '../lib/AudioEngine';
 
 interface SpeedControlProps {
@@ -8,6 +9,7 @@ interface SpeedControlProps {
 }
 
 const SPEED_PRESETS = [0.5, 0.75, 1.0, 1.25, 1.5];
+const SPEED_STEP = 0.05;
 
 export function SpeedControl({
   speed,
@@ -15,35 +17,91 @@ export function SpeedControl({
   onSpeedChange,
   onSpeedRampChange,
 }: SpeedControlProps) {
+  const [isEditing, setIsEditing] = useState(false);
+  const [editValue, setEditValue] = useState('');
+
+  const handleEditStart = () => {
+    setEditValue(speed.toFixed(2));
+    setIsEditing(true);
+  };
+
+  const handleEditCommit = () => {
+    const val = parseFloat(editValue);
+    if (!isNaN(val) && val >= 0.25 && val <= 2.0) {
+      onSpeedChange(val);
+    }
+    setIsEditing(false);
+  };
+
   return (
     <div className="bg-gray-800/50 rounded-lg p-4">
       <h3 className="text-gray-300 text-sm font-medium mb-3 uppercase tracking-wider">
         Speed
       </h3>
 
-      {/* Current speed display */}
-      <div className="text-center mb-3">
-        <span className="text-2xl font-mono text-white font-bold">
-          {speed.toFixed(2)}x
-        </span>
+      {/* Current speed display — click to edit */}
+      <div className="text-center mb-4">
+        {isEditing ? (
+          <input
+            type="number"
+            min={0.25}
+            max={2.0}
+            step={0.05}
+            value={editValue}
+            onChange={(e) => setEditValue(e.target.value)}
+            onBlur={handleEditCommit}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') handleEditCommit();
+              if (e.key === 'Escape') setIsEditing(false);
+            }}
+            autoFocus
+            className="w-28 text-center text-3xl font-mono font-bold bg-gray-700 text-white
+                       border border-blue-500 rounded-lg px-2 py-1 focus:outline-none"
+          />
+        ) : (
+          <button
+            onClick={handleEditStart}
+            className="text-3xl font-mono text-white font-bold hover:text-blue-400
+                       transition-colors cursor-text"
+            title="Click to type a value"
+          >
+            {speed.toFixed(2)}x
+          </button>
+        )}
       </div>
 
-      {/* Speed slider */}
-      <input
-        type="range"
-        min={0.25}
-        max={2.0}
-        step={0.05}
-        value={speed}
-        onChange={(e) => onSpeedChange(parseFloat(e.target.value))}
-        className="w-full h-1.5 bg-gray-700 rounded-full appearance-none cursor-pointer
-                   [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3.5
-                   [&::-webkit-slider-thumb]:h-3.5 [&::-webkit-slider-thumb]:rounded-full
-                   [&::-webkit-slider-thumb]:bg-blue-500"
-      />
-      <div className="flex justify-between text-xs text-gray-500 mt-1 mb-3">
-        <span>0.25x</span>
-        <span>2.0x</span>
+      {/* Slider with -/+ buttons */}
+      <div className="flex items-center gap-3 mb-3">
+        <button
+          onClick={() => onSpeedChange(Math.round((speed - SPEED_STEP) * 100) / 100)}
+          disabled={speed <= 0.25}
+          className="w-9 h-9 flex items-center justify-center rounded-full bg-gray-700
+                     text-white text-lg font-bold hover:bg-gray-600
+                     disabled:opacity-30 disabled:cursor-not-allowed transition-colors shrink-0"
+        >
+          &minus;
+        </button>
+        <input
+          type="range"
+          min={0}
+          max={2.0}
+          step={0.05}
+          value={speed}
+          onChange={(e) => onSpeedChange(Math.max(0.25, parseFloat(e.target.value)))}
+          className="flex-1 h-1.5 bg-gray-700 rounded-full appearance-none cursor-pointer
+                     [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-4
+                     [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:rounded-full
+                     [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:shadow-md"
+        />
+        <button
+          onClick={() => onSpeedChange(Math.round((speed + SPEED_STEP) * 100) / 100)}
+          disabled={speed >= 2.0}
+          className="w-9 h-9 flex items-center justify-center rounded-full bg-gray-700
+                     text-white text-lg font-bold hover:bg-gray-600
+                     disabled:opacity-30 disabled:cursor-not-allowed transition-colors shrink-0"
+        >
+          +
+        </button>
       </div>
 
       {/* Preset buttons */}
@@ -52,9 +110,9 @@ export function SpeedControl({
           <button
             key={preset}
             onClick={() => onSpeedChange(preset)}
-            className={`flex-1 py-1.5 text-sm rounded font-mono transition-colors ${
+            className={`flex-1 py-2 text-sm rounded-lg font-mono transition-colors ${
               Math.abs(speed - preset) < 0.01
-                ? 'bg-blue-600 text-white'
+                ? 'bg-white text-gray-900 font-bold'
                 : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
             }`}
           >

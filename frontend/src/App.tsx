@@ -5,8 +5,8 @@ import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import { useBookmarks } from './hooks/useBookmarks';
 import { URLInput } from './components/URLInput';
 import { TrackInfo } from './components/TrackInfo';
-import { WaveformDisplay } from './components/WaveformDisplay';
 import { TransportControls } from './components/TransportControls';
+import { extractPeaks } from './lib/peaks';
 import { SpeedControl } from './components/SpeedControl';
 import { PitchControl } from './components/PitchControl';
 import { LoopControls } from './components/LoopControls';
@@ -17,7 +17,7 @@ function App() {
   const engine = useAudioEngine();
   const [track, setTrack] = useState<TrackInfoType | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [audioBuffer, setAudioBuffer] = useState<AudioBuffer | null>(null);
+  const [peaks, setPeaks] = useState<number[] | null>(null);
 
   const { bookmarks, saveBookmark, deleteBookmark } = useBookmarks(track?.id ?? null);
 
@@ -59,7 +59,8 @@ function App() {
           }
         );
 
-        setAudioBuffer(engine.getBuffer());
+        const buf = engine.getBuffer();
+        if (buf) setPeaks(extractPeaks(buf, 200));
       } catch (err) {
         const message =
           err instanceof Error ? err.message : 'Failed to load track';
@@ -121,13 +122,6 @@ function App() {
     [engine]
   );
 
-  const handleLoopChange = useCallback(
-    (start: number, end: number) => {
-      engine.setLoop(start, end);
-    },
-    [engine]
-  );
-
   return (
     <div className="min-h-screen bg-gray-900 text-gray-100">
       <div className="max-w-5xl mx-auto px-4 py-6 flex flex-col gap-5">
@@ -150,24 +144,15 @@ function App() {
           </div>
         )}
 
-        {/* Track Info */}
+        {/* Track hero + transport */}
         <TrackInfo track={track} />
 
-        {/* Waveform */}
-        <WaveformDisplay
-          audioBuffer={audioBuffer}
-          currentTime={engine.currentTime}
-          duration={engine.duration}
-          loop={engine.loop}
-          onSeek={engine.seek}
-          onLoopChange={handleLoopChange}
-        />
-
-        {/* Transport */}
         <TransportControls
           isPlaying={engine.isPlaying}
           currentTime={engine.currentTime}
           duration={engine.duration}
+          loop={engine.loop}
+          peaks={peaks}
           onTogglePlay={engine.togglePlayPause}
           onSeek={engine.seek}
         />
