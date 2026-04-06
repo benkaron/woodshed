@@ -167,8 +167,6 @@ export class AudioEngine {
     this.sendMsg(['tempo', this._speed]);
     this.sendMsg(['pitch', semitonesToPitch(this._pitch)]);
 
-    await this.ctx.suspend();
-
     return { duration: this.buffer.duration };
   }
 
@@ -176,7 +174,8 @@ export class AudioEngine {
 
   play(): void {
     if (!this.rbNode || !this.buffer || this._playing) return;
-    this.ctx.resume();
+    // Keep context always running — no suspend/resume latency
+    if (this.ctx.state === 'suspended') this.ctx.resume();
     this.sendMsg(['play']);
     this._playing = true;
     this.startTick();
@@ -188,7 +187,7 @@ export class AudioEngine {
     this._playing = false;
     this.sendMsg(['pause']);
     this.stopTick();
-    this.ctx.suspend();
+    // Don't suspend — processor handles silence, instant resume
     this.onPlayStateChange?.(false);
   }
 

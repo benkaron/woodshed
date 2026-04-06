@@ -61,11 +61,11 @@ export function useKeyboardShortcuts(actions: KeyboardShortcutActions): void {
           break;
         case 'ArrowLeft':
           event.preventDefault();
-          actions.seekRelative(-5);
+          actions.seekRelative(-1);
           break;
         case 'ArrowRight':
           event.preventDefault();
-          actions.seekRelative(5);
+          actions.seekRelative(1);
           break;
         case 'r':
         case 'R':

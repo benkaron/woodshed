@@ -7,8 +7,10 @@ interface TransportControlsProps {
   duration: number;
   loop: LoopBounds | null;
   peaks: number[] | null;
+  seekStep: number;
   onTogglePlay: () => void;
   onSeek: (time: number) => void;
+  onSeekStepChange: (step: number) => void;
 }
 
 function formatTime(seconds: number): string {
@@ -140,8 +142,10 @@ export function TransportControls({
   duration,
   loop,
   peaks,
+  seekStep,
   onTogglePlay,
   onSeek,
+  onSeekStepChange,
 }: TransportControlsProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -280,9 +284,30 @@ export function TransportControls({
           {loop && <div className="w-10" />}
         </div>
 
-        <span className="text-gray-400 font-mono text-xs w-12 text-right">
-          {formatTime(duration)}
-        </span>
+        <div className="flex items-center gap-2">
+          {/* Seek step selector */}
+          <div className="flex items-center gap-1">
+            <span className="text-gray-600 text-[10px]">←→</span>
+            <select
+              value={seekStep}
+              onChange={(e) => onSeekStepChange(parseFloat(e.target.value))}
+              className="bg-transparent text-gray-400 text-xs font-mono
+                         border border-gray-700/50 rounded-md px-1.5 py-0.5
+                         focus:outline-none focus:border-gray-600
+                         cursor-pointer appearance-none text-center w-12"
+            >
+              <option value={0.5}>0.5s</option>
+              <option value={1}>1s</option>
+              <option value={2}>2s</option>
+              <option value={3}>3s</option>
+              <option value={5}>5s</option>
+              <option value={10}>10s</option>
+            </select>
+          </div>
+          <span className="text-gray-400 font-mono text-xs">
+            {formatTime(duration)}
+          </span>
+        </div>
       </div>
     </div>
   );

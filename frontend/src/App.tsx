@@ -18,6 +18,7 @@ function App() {
   const [track, setTrack] = useState<TrackInfoType | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [peaks, setPeaks] = useState<number[] | null>(null);
+  const [seekStep, setSeekStep] = useState(2);
 
   const { bookmarks, saveBookmark, deleteBookmark } = useBookmarks(track?.id ?? null);
 
@@ -93,12 +94,12 @@ function App() {
       clearLoop: () => engine.clearLoop(),
       adjustSpeed: (delta: number) =>
         engine.setSpeed(Math.round((engine.speed + delta) * 100) / 100),
-      seekRelative: (delta: number) => engine.seek(engine.currentTime + delta),
+      seekRelative: (delta: number) => engine.seek(engine.currentTime + delta * seekStep),
       adjustPitch: (delta: number) => engine.setPitch(engine.pitch + delta),
       toggleSpeedRamp: () =>
         engine.setSpeedRamp({ enabled: !engine.speedRamp.enabled }),
     }),
-    [engine]
+    [engine, seekStep]
   );
 
   useKeyboardShortcuts(shortcutActions);
@@ -153,8 +154,10 @@ function App() {
           duration={engine.duration}
           loop={engine.loop}
           peaks={peaks}
+          seekStep={seekStep}
           onTogglePlay={engine.togglePlayPause}
           onSeek={engine.seek}
+          onSeekStepChange={setSeekStep}
         />
 
         {/* Control Panels Grid */}
