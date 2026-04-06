@@ -88,7 +88,7 @@ async def stream(video_id: str) -> FileResponse:
         output_template = str(CACHE_DIR / f"{video_id}.%(ext)s")
         cmd = [
             "yt-dlp",
-            "-f", "bestaudio",
+            "-f", "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
             "-o", output_template,
             "--no-playlist",
             "--no-post-overwrites",
